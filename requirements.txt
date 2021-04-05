@@ -1,1 +1,1 @@
-pytorch-lightning==1.2.0
+lightning-flash==0.2.2rc2
