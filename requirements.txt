@@ -1,1 +1,1 @@
-lightning-flash==0.2.2
+lightning-flash==0.2.3
