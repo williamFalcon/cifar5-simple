@@ -1,140 +1,61 @@
-
-from argparse import ArgumentParser
-
 import os
+
 import torch
-import pytorch_lightning as pl
-import torchmetrics.functional as PLF
-from torch.nn import functional as F
-from flash.vision import ImageClassificationData
-from torchvision import transforms
-from torchvision import models
-import numpy as np
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision
+from flash.image import ImageClassificationData, ImageClassifier
+import argparse
+from pytorch_lightning import seed_everything
+from flash import Trainer
+from pytorch_lightning.callbacks import LearningRateMonitor
+from pytorch_lightning.loggers import TensorBoardLogger
 
+seed_everything(7)
 
-class LitClassifier(pl.LightningModule):
-    def __init__(self, backbone='resnet50', num_classes=5, hidden_dim=1024, learning_rate=1e-3):
-        super().__init__()
-        self.save_hyperparameters()
-        self.backbone = getattr(models, backbone)()
-        self.classifier = torch.nn.Sequential(
-            torch.nn.Linear(1000, hidden_dim),
-            torch.nn.Linear(hidden_dim, num_classes)
-        )
+parser = argparse.ArgumentParser()
+parser.add_argument('--gpus', type=int, default=0,
+                            help='number of gpus to use for training')
+parser.add_argument('--strategy', type=str, default='ddp',
+                            help='strategy to use for training')
+parser.add_argument('--batch_size', type=int, default=64,
+                            help='batch size to use for training')
+parser.add_argument('--epochs', type=int, default=5,
+                            help='maximum number of epochs for training')
+parser.add_argument('--data_dir', type=str, default='/datastores/cifar5',
+                            help='the directory to load data from')
+parser.add_argument('--learning_rate', type=float, default=1e-4, 
+                            help='the learning rate to use during model training')
+parser.add_argument('--optimizer', type=str, default='Adam',
+                            help='the optimizer to use during model training')
+args = parser.parse_args()
 
-    def forward(self, batch):
-        x, y = batch
-
-        # used only in .predict()
-        y_hat = self.backbone(x)
-        y_hat = self.classifier(y_hat)
-        predicted_classes = F.log_softmax(y_hat).argmax(dim=1)
-        return predicted_classes
-
-    def training_step(self, batch, batch_idx):
-        x, y = batch
-        y_hat = self.backbone(x)
-        y_hat = self.classifier(y_hat)
-        loss = F.cross_entropy(y_hat, y)
-        self.log('train_loss', loss, on_epoch=True)
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        x, y = batch
-        y_hat = self.backbone(x)
-        y_hat = self.classifier(y_hat)
-        loss = F.cross_entropy(y_hat, y)
-        acc = PLF.accuracy(F.log_softmax(y_hat).argmax(dim=1), y)
-        self.log('valid_loss', loss)
-        self.log('valid_acc', acc)
-
-    def test_step(self, batch, batch_idx):
-        x, y = batch
-        y_hat = self.backbone(x)
-        y_hat = self.classifier(y_hat)
-        loss = F.cross_entropy(y_hat, y)
-        acc = PLF.accuracy(F.log_softmax(y_hat).argmax(dim=1), y)
-        self.log('test_loss', loss)
-        self.log('test_acc', acc)
-
-    def configure_optimizers(self):
-        # self.hparams available because we called self.save_hyperparameters()
-        return torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
-
-    @staticmethod
-    def add_model_specific_args(parent_parser):
-        parser = ArgumentParser(parents=[parent_parser], add_help=False)
-        parser.add_argument('--learning_rate', type=float, default=0.0001)
-        parser.add_argument('--backbone', type=str, default='resnet50')
-        parser.add_argument('--batch_size', default=32, type=int)
-        parser.add_argument('--num_classes', default=5, type=int)
-        parser.add_argument('--hidden_dim', type=int, default=1024)
-        return parser
-
-
-def cli_main():
-    pl.seed_everything(1234)
-
-    # ------------
-    # args
-    # ------------
-    parser = ArgumentParser()
-    parser.add_argument('--data_dir', type=str, default='.')
-
-    # add trainer args (gpus=x, precision=...)
-    parser = pl.Trainer.add_argparse_args(parser)
-
-    # add model args (batch_size hidden_dim, etc...), anything defined in add_model_specific_args
-    parser = LitClassifier.add_model_specific_args(parser)
-    args = parser.parse_args()
-
-    # ------------
-    # data
-    # ------------
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.4913, 0.482, 0.446], std=[0.247, 0.243, 0.261])
+transform = torchvision.transforms.Compose([
+        torchvision.transforms.ToTensor(),
+        torchvision.transforms.Normalize(mean=[0.4913, 0.482, 0.446], std=[0.247, 0.243, 0.261])
     ])
 
-    # in real life you would have a separate validation split
-    datamodule = ImageClassificationData.from_folders(
+datamodule = ImageClassificationData.from_folders(
         train_folder=args.data_dir + '/train',
-        valid_folder=args.data_dir + '/test',
+        val_folder=args.data_dir + '/test',
         test_folder=args.data_dir + '/test',
         batch_size=args.batch_size,
-        transform=transform
-    )
+        transform_kwargs={'mean': (0.4913, 0.482, 0.446), 'std': (0.247, 0.243, 0.261)}
+     )
 
-    # ------------
-    # model
-    # ------------
-    model = LitClassifier(
-        backbone=args.backbone,
-        learning_rate=args.learning_rate,
-        hidden_dim=args.hidden_dim
-    )
 
-    # ------------
-    # training
-    # ------------
-    trainer = pl.Trainer.from_argparse_args(args, fast_dev_run=True)
-    trainer.fit(model, datamodule.train_dataloader(), datamodule.val_dataloader())
+# %%
+model = ImageClassifier(backbone="resnet18", num_classes=datamodule.num_classes, learning_rate=args.learning_rate, optimizer=args.optimizer)
 
-    # ------------
-    # testing
-    # ------------
-    result = trainer.test(model, test_dataloaders=datamodule.test_dataloader())
-    print(result)
-
-    # predicting
-    preds = trainer.predict(model, datamodule.test_dataloader())
-    preds = list(np.stack(preds).flatten())
-
-    path = os.getcwd() + '/predictions.txt'
-    with open(path, 'w') as f:
-        preds = [str(x) for x in preds]
-        f.write('\n'.join(preds))
-
+trainer = Trainer(
+    progress_bar_refresh_rate=10,
+    max_epochs=args.epochs,
+    gpus=args.gpus,
+    #logger=TensorBoardLogger("lightning_logs/", name="resnet"),
+    #callbacks=[LearningRateMonitor(logging_interval="step")],
+)
 
 if __name__ == '__main__':
-    cli_main()
+    trainer.fit(model, datamodule=datamodule)
+    #print('finished fitting')
+    trainer.test(model, datamodule=datamodule)
